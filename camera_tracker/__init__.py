@@ -8,10 +8,11 @@ from flask import Flask, request, Response
 
 users = {
     "1a2b3c4d": -1,
-    "5e6f7g8h": -1
+    "5e6f7g8h": -1,
+    "9i10j11k12l": -1,
 }
 fluxs = []
-thread = []
+threads = []
 stopEvent = Event
 
 
@@ -56,7 +57,7 @@ def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Even
             minSize=(int(minW), int(minH)),
         )
 
-        to_not_remove = listIdOnCamera.copy()
+        stillOnCamera = []
         for (x, y, w, h) in faces:
             cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
             id, confidence = recognizer.predict(gray[y:y + h, x:x + w])
@@ -64,8 +65,10 @@ def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Even
             # Check if confidence is less them 100 ==> "0" is perfect match
             if (confidence < 100):
                 who = names[id]["name"]
-                eventQueue.put({"name": who, "id": id})
-                if id in to_not_remove: to_not_remove.remove(id)
+                stillOnCamera.append(id)
+                if id not in listIdOnCamera:
+                    eventQueue.put({"name": who, "id": id, "source": url, "confidence": confidence})
+                    listIdOnCamera.append(id)
             else:
                 who = "unknown"
 
@@ -74,7 +77,12 @@ def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Even
             cv2.putText(img, str(f"  {round(100 - confidence)}%"), (x + 5, y + h - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 1)
 
-        listIdOnCamera = [id for id in listIdOnCamera if id in to_not_remove]
+        for id in listIdOnCamera:
+            if id in stillOnCamera:
+                pass
+            else:
+                eventQueue.put({"name": who, "id": id, "source": url, "confidence": None})
+                listIdOnCamera.remove(id)
 
         ret, buffer = cv2.imencode('.jpg', img)
         frame = buffer.tobytes()
@@ -88,13 +96,16 @@ def handleEvent(eventQueue: Queue, stopEvent: Event):
 
     while not stopEvent.is_set():
         event = eventQueue.get()
-        users[event["id"]] = event["name"]
+        if event["confidence"] is None:
+            users[event["id"]] = -1
+        else:
+            users[event["id"]] = event["source"]
         print(event)
 
 
 def launch(listUrl):
 
-    global fluxs, eventQueue, stopEvent
+    global fluxs, eventQueue, stopEvent, threads
     for i in range(len(listUrl)):
         fluxs.append(Queue())
 
@@ -105,12 +116,12 @@ def launch(listUrl):
     eventQueue = Queue()
     stopEvent = Event()
 
-    threads = []
     for i in range(len(listUrl)):
         threads.append(Thread(target=detectFaces, args=(
             urlQueue, eventQueue, fluxs[i], stopEvent)))
 
     for thread in threads:
+        print("Starting thread", thread.ident)
         thread.start()
 
     return fluxs, eventQueue, stopEvent, threads
