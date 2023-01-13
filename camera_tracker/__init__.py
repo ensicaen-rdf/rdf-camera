@@ -2,19 +2,14 @@ from threading import Thread, Event, current_thread
 from queue import Queue
 import cv2
 import os
-import atexit
+import ffmpegcv
+import requests as req
 
-from flask import Flask, request, Response
+from flask import Flask, request, Response, url_for, redirect, g
 
-users = {
-    "1a2b3c4d": -1,
-    "5e6f7g8h": -1,
-    "9i10j11k12l": -1,
-}
-fluxs = []
-threads = []
-stopEvent = Event
-
+users = {}
+fluxs = {}
+stopEvent = None
 
 def getIds():
     names = []
@@ -26,7 +21,7 @@ def getIds():
     return names
 
 
-def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Event):
+def detectFaces(urlQueue: Queue, users: Queue, flux: Queue, stopEvent: Event):
     names = getIds()
     recognizer = cv2.face.LBPHFaceRecognizer_create()
     recognizer.read(r'./camera_tracker/trainer/trainer.yml')
@@ -34,14 +29,25 @@ def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Even
         r'./camera_tracker/haarcascade_frontalface_default.xml')
 
     listIdOnCamera = []
-    url = urlQueue.get()
-    print(current_thread().ident, url)
-    cam = cv2.VideoCapture(url)
-    cam.set(3, 640)  # set video widht
-    cam.set(4, 480)  # set video height
+    index, url = urlQueue.get()
+    print(f"Thread started {current_thread().ident} on {url}")
+    cam = ffmpegcv.VideoCaptureCAM(camname=url,
+                                   camsize=(640, 480),
+                                   pix_fmt='bgr24',
+                                   crop_xywh=None,
+                                   resize=None,
+                                   resize_keepratio=True,
+                                   resize_keepratioalign='center')
+    # cam.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+    if not cam.isopened:
+        print("Error opening camera")
+        return
+    print("Camera opened")
+    # cam.set(3, 640)  # set video widht
+    # cam.set(4, 480)  # set video height
 
-    minW = 0.1 * cam.get(3)
-    minH = 0.1 * cam.get(4)
+    minW = 0.1 * 640 #cam.get(3)
+    minH = 0.1 * 480 #cam.get(4)
 
     while stopEvent.is_set:
         success, img = cam.read()
@@ -65,9 +71,13 @@ def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Even
             # Check if confidence is less them 100 ==> "0" is perfect match
             if (confidence < 100):
                 who = names[id]["name"]
+                nationalId = names[id]["id"]
                 stillOnCamera.append(id)
                 if id not in listIdOnCamera:
-                    eventQueue.put({"name": who, "id": id, "source": url, "confidence": confidence})
+                    u = users.get()
+                    u[nationalId] = index
+                    users.put(u)
+
                     listIdOnCamera.append(id)
             else:
                 who = "unknown"
@@ -81,56 +91,40 @@ def detectFaces(urlQueue: Queue, eventQueue: Queue, flux: Queue, stopEvent: Even
             if id in stillOnCamera:
                 pass
             else:
-                eventQueue.put({"name": who, "id": id, "source": url, "confidence": None})
+                u = users.get()
+                u[nationalId] = -1
+                users.put(u)
                 listIdOnCamera.remove(id)
 
-        ret, buffer = cv2.imencode('.jpg', img)
-        frame = buffer.tobytes()
-        flux.put(b'--frame\r\n'
-                 b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        ret, frame = cv2.imencode('.jpg', img)
+        flux.put(frame.tobytes())
 
     cam.release()
 
-
-def handleEvent(eventQueue: Queue, stopEvent: Event):
-
-    while not stopEvent.is_set():
-        event = eventQueue.get()
-        if event["confidence"] is None:
-            users[event["id"]] = -1
-        else:
-            users[event["id"]] = event["source"]
-        print(event)
-
-
 def launch(listUrl):
 
-    global fluxs, eventQueue, stopEvent, threads
-    for i in range(len(listUrl)):
-        fluxs.append(Queue())
+    fluxs = {}
+    users = {}
+
+    for name in getIds():
+        users[name["id"]] = -1
+
+    for index, url in listUrl:
+        fluxs[index] = Queue()
 
     urlQueue = Queue()
-    for url in listUrl:
-        urlQueue.put(url)
+    for index, url in listUrl:
+        urlQueue.put((index, url))
 
-    eventQueue = Queue()
     stopEvent = Event()
+    usersQueue = Queue()
+    usersQueue.put(users)
 
-    for i in range(len(listUrl)):
-        threads.append(Thread(target=detectFaces, args=(
-            urlQueue, eventQueue, fluxs[i], stopEvent)))
+    for index, url in listUrl:
+        Thread(target=detectFaces, args=(
+            urlQueue, usersQueue, fluxs[index], stopEvent)).start()
 
-    for thread in threads:
-        print("Starting thread", thread.ident)
-        thread.start()
-
-    return fluxs, eventQueue, stopEvent, threads
-
-def stopServer():
-    global stopEvent, threads
-    stopEvent.set()
-    for thread in threads:
-        thread.join()
+    return fluxs, stopEvent, users
 
 def create_app(config = None):
 
@@ -154,20 +148,39 @@ def create_app(config = None):
     def api():
         return 'camera_tracker api'
 
-    @app.route('/video_feed', methods=("GET",))
+    def gen_frames(q: Queue):
+        while True:
+            frame = q.get()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+    @app.route('/camera_feed', methods=("GET",))
+    def camera_feed():
+        global fluxs
+        id = int(request.args.get('id'))
+        if id < len(fluxs):
+            return Response(gen_frames(fluxs[id]), mimetype='multipart/x-mixed-replace; boundary=frame')
+        return "Camera not found"
+
+    @app.route('/person_feed', methods=("GET",))
     def video_feed():
+        global users
         idNational = request.args.get('id')
 
-        if idNational in users:
+        if idNational in users.keys():
+            print(users)
             if users[idNational] != -1:
-                return Response(fluxs[users[idNational]], mimetype='multipart/x-mixed-replace; boundary=frame')
+                return redirect(url_for('camera_feed', id=users[idNational]))
 
             return "User not found on camera"
 
         return "User not found or id not provided"
 
-    fluxs, eventQueue, stopEvent, threads = launch([0])
-    Thread(target=handleEvent, args=(eventQueue, stopEvent)).start()
+    fl, st, us = launch(
+        [(0, "http://192.168.3.145:4747/video"),
+         (1, "http://192.168.3.34:4747/video")])
+    global users, fluxs
+    users = us
+    fluxs = fl
 
-    atexit.register(stopServer)
     return app
