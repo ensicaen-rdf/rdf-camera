@@ -180,9 +180,10 @@ def create_app(config = None):
 
         return "User not found or id not provided"
 
-    fl, st, us = launch(
-        [(0, "http://192.168.3.145:4747/video"),
-         (1, "http://192.168.3.34:4747/video")])
+    fl, st, us = launch([
+        (0, "http://192.168.3.145:4747/video")
+         #,(1, "http://192.168.3.34:4747/video")
+        ])
     global users, fluxs
     users = us
     fluxs = fl
