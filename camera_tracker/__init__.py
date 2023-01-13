@@ -18,6 +18,7 @@ def getIds():
             data = line.strip().split(";")
             names.append({"name": data[0], "id": data[1]})
 
+    print(names)
     return names
 
 
@@ -111,6 +112,7 @@ def launch(listUrl):
         users[name["id"]] = -1
 
     for index, url in listUrl:
+        print(f"Creating flux {index} for {url}")
         fluxs[index] = Queue()
 
     urlQueue = Queue()
