@@ -76,6 +76,7 @@ def detectFaces(urlQueue: Queue, users: Queue, flux: Queue, stopEvent: Event):
                 if id not in listIdOnCamera:
                     u = users.get()
                     u[nationalId] = index
+                    print(f"User {nationalId} detected on camera {index}")
                     users.put(u)
 
                     listIdOnCamera.append(id)
@@ -170,6 +171,7 @@ def create_app(config = None):
         if idNational in users.keys():
             print(users)
             if users[idNational] != -1:
+                print(f"redirect to camera {users[idNational]}")
                 return redirect(url_for('camera_feed', id=users[idNational]))
 
             return "User not found on camera"
